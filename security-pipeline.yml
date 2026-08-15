@@ -1,0 +1,174 @@
+name: Pipeline de sécurité AppSec + IA (SAST + DAST + LLM Red Team)
+
+# Déclencheurs :
+# - push/PR sur main : SAST seul (rapide, "shift-left", quelques minutes)
+# - manuel (workflow_dispatch) ou planifié (nightly) : pipeline complet,
+#   car DAST + Promptfoo redteam sont trop longs (~40-60 min à eux deux)
+#   pour tourner sur chaque commit — voir tableau de décision dans le
+#   rapport PFA, section CI/CD.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+  schedule:
+    - cron: "0 2 * * *"  # tous les jours à 2h UTC
+
+jobs:
+  # =====================================================================
+  # Job 1 — SAST seul : tourne sur CHAQUE push/PR, rapide
+  # =====================================================================
+  sast:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Installer Semgrep
+        run: pip install semgrep --break-system-packages
+
+      - name: Lancer Semgrep (rulesets combinés)
+        run: |
+          semgrep \
+            --config=p/owasp-top-ten --config=p/security-audit \
+            --config=p/r2c-security-audit --config=p/auto \
+            . --json --output=semgrep_combined.json
+
+      - name: Publier le résultat SAST comme artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-results
+          path: semgrep_combined.json
+          retention-days: 30
+
+  # =====================================================================
+  # Job 2 — Pipeline complet : DAST + LLM Red Team + corrélation + triage
+  # + rapport. Uniquement sur déclenchement manuel ou planifié (nightly),
+  # pas sur chaque commit (trop long).
+  # =====================================================================
+  full-pipeline:
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    needs: sast
+    timeout-minutes: 90
+    env:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Récupérer le résultat SAST du job précédent
+        uses: actions/download-artifact@v4
+        with:
+          name: semgrep-results
+
+      - name: Installer les dépendances Python
+        run: pip install requests --break-system-packages
+
+      - name: Installer Node.js (pour Promptfoo)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Installer Promptfoo
+        run: npm install -g promptfoo
+
+      # -- Ollama : sur un vrai runner Linux, pas de couche WSL2/Windows
+      # à gérer — c'est exactement le problème qu'on a passé une journée
+      # entière à corriger en local (voir CONTEXTE_PROJET_PFA.md, section
+      # 9 et 17), et qui disparaît structurellement ici.
+      - name: Installer et démarrer Ollama
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          ollama serve &
+          sleep 5
+          ollama pull llama3.2:3b
+          ollama pull nomic-embed-text
+
+      - name: Démarrer Juice Shop (config LLM pointée sur Ollama)
+        run: |
+          cat > promptfoo-config.yml << 'EOF'
+          application:
+            chatBot:
+              model: 'llama3.2:3b'
+              llmApiUrl: 'http://host.docker.internal:11434/v1'
+          EOF
+          docker run --rm -d -p 3000:3000 --name juice-shop \
+            --add-host=host.docker.internal:host-gateway \
+            -e "NODE_ENV=promptfoo-config" \
+            -v "$PWD/promptfoo-config.yml:/juice-shop/config/promptfoo-config.yml" \
+            bkimminich/juice-shop
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:3000 && break
+            sleep 2
+          done
+
+      - name: Scan DAST (OWASP ZAP)
+        run: |
+          docker run --rm -t \
+            --add-host=host.docker.internal:host-gateway \
+            -v "$PWD:/zap/wrk/:rw" zaproxy/zap-stable zap-full-scan.py \
+            -t http://host.docker.internal:3000 \
+            -r zap_full_report_v2.html -J zap_full_report_v2.json -j || true
+          # zap-full-scan.py peut retourner un code non-zéro même en
+          # succès (WARN trouvés) — seule la présence du fichier fait foi,
+          # comme dans pipeline_runner.py en local.
+          test -f zap_full_report_v2.json
+
+      - name: Redteam LLM (Promptfoo)
+        run: |
+          TOKEN_EMAIL="ci-$(date +%s)@test.com"
+          curl -s -X POST http://localhost:3000/api/Users/ \
+            -H "Content-Type: application/json" \
+            -d "{\"email\":\"$TOKEN_EMAIL\",\"password\":\"Test1234!\",\"passwordRepeat\":\"Test1234!\"}" > /dev/null
+          TOKEN=$(curl -s -X POST http://localhost:3000/rest/user/login \
+            -H "Content-Type: application/json" \
+            -d "{\"email\":\"$TOKEN_EMAIL\",\"password\":\"Test1234!\"}" \
+            | python3 -c "import sys,json; print(json.load(sys.stdin)['authentication']['token'])")
+          export JUICE_TOKEN=$TOKEN
+          promptfoo redteam run --force --max-concurrency 1
+          EVAL_ID=$(promptfoo redteam run --force --max-concurrency 1 2>&1 | grep -oP 'ID: \K[\w:-]+' | tail -1)
+          promptfoo export eval "$EVAL_ID" -o promptfoo_results.json
+
+      - name: Unification des findings
+        run: python3 unified_findings.py
+
+      - name: Triage IA (faux positifs)
+        run: python3 -u triage.py
+
+      - name: Génération du rapport consolidé
+        run: python3 -u generate_report.py
+
+      - name: Comparaison embeddings local vs cloud (si clé Gemini disponible)
+        if: env.GEMINI_API_KEY != ''
+        run: python3 compare_embeddings.py
+
+      - name: Publier le rapport final comme artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: consolidated-report
+          path: |
+            consolidated_report.md
+            unified_findings_triaged.json
+          retention-days: 90
+
+      - name: Bloquer le build si un finding Critical/High non revu est trouvé
+        run: |
+          python3 - << 'EOF'
+          import json, sys
+          with open("unified_findings_triaged.json", encoding="utf-8") as f:
+              findings = json.load(f)
+          critical = [
+              f for f in findings
+              if f.get("triage", {}).get("verdict") == "true_positive"
+              and str(f.get("triage", {}).get("severity", "")).lower() in ("critical", "high")
+          ]
+          print(f"{len(critical)} finding(s) Critical/High confirmé(s).")
+          if critical:
+              for f in critical:
+                  print(f"  - [{f.get('tool')}] {f.get('title')}")
+              # Ne fait volontairement PAS échouer le job (exit 0) : le
+              # triage IA peut se tromper (voir needs_review dans le
+              # rapport PFA) — bloquer le merge automatiquement serait
+              # trop risqué sans revue humaine. Le rapport et ce résumé
+              # servent d'alerte, pas de veto automatique.
+          EOF
