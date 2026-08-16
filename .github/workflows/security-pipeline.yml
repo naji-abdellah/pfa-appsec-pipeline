@@ -27,18 +27,45 @@ jobs:
       - name: Installer Semgrep
         run: pip install semgrep --break-system-packages
 
-      - name: Lancer Semgrep (rulesets combinés)
+      # La cible réelle de l'évaluation de sécurité est OWASP Juice Shop,
+      # pas notre propre dépôt pipeline. actions/checkout ne récupère que
+      # ce dépôt-ci — sans ce clone explicite, Semgrep scannait par erreur
+      # nos propres scripts (correlate.py, ce workflow...) au lieu du code
+      # source de l'application testée, ce qui a fait chuter les findings
+      # de 222+ à 13 et cassé toute corrélation SAST/DAST (aucun candidat
+      # SAST dans la catégorie A05 côté Juice Shop).
+      - name: Cloner le code source de la cible (Juice Shop)
+        run: git clone --depth 1 https://github.com/juice-shop/juice-shop.git juice-shop-src
+
+      - name: Lancer Semgrep sur Juice Shop (rulesets combinés)
         run: |
           semgrep \
             --config=p/owasp-top-ten --config=p/security-audit \
             --config=p/r2c-security-audit --config=p/auto \
-            . --json --output=semgrep_combined.json
+            juice-shop-src --json --output=semgrep_combined.json
 
       - name: Publier le résultat SAST comme artefact
         uses: actions/upload-artifact@v4
         with:
           name: semgrep-results
           path: semgrep_combined.json
+          retention-days: 30
+
+      # Scan séparé et clairement identifié du pipeline lui-même (hygiène
+      # de la CI : versions d'actions non épinglées, pattern curl|sh...).
+      # Résultat volontairement PAS mélangé au rapport Juice Shop — c'est
+      # un constat sur notre propre infrastructure, pas sur la cible
+      # évaluée. Publié comme artefact séparé pour référence/discussion.
+      - name: Lancer Semgrep sur le pipeline lui-même (hygiène CI, informatif)
+        continue-on-error: true
+        run: |
+          semgrep --config=p/owasp-top-ten . --json --output=semgrep_self_scan.json
+
+      - name: Publier le scan du pipeline comme artefact séparé
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-self-scan-ci-hygiene
+          path: semgrep_self_scan.json
           retention-days: 30
 
   # =====================================================================
