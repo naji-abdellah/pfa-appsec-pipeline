@@ -112,7 +112,7 @@ jobs:
         # (voir pipeline_runner.py et CONTEXTE_PROJET_PFA.md, section 6).
         timeout-minutes: 10
         run: |
-          docker run --rm -t \
+          docker run --rm -t -u root \
             --add-host=host.docker.internal:host-gateway \
             -v "$PWD:/zap/wrk/:rw" zaproxy/zap-stable zap-baseline.py \
             -t http://host.docker.internal:3000 \
