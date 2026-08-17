@@ -129,23 +129,24 @@ jobs:
             sleep 2
           done
 
-      - name: Scan DAST (OWASP ZAP — baseline, adapté à la CI)
-        # zap-full-scan.py (+AJAX spider) prend 1h+ en pratique — bien
-        # au-delà de ce qui est raisonnable pour un runner GitHub standard
-        # et du quota de minutes disponible. zap-baseline.py (passif
-        # uniquement, quelques minutes) valide la mécanique CI/CD sans
-        # épuiser le quota. Le scan actif complet reste l'outil de
-        # référence pour un audit approfondi, exécuté en local/manuel
-        # (voir pipeline_runner.py et CONTEXTE_PROJET_PFA.md, section 6).
-        timeout-minutes: 10
+      - name: Scan DAST (OWASP ZAP — scan actif sans AJAX spider)
+        # zap-baseline.py (passif) ne déclenche jamais les règles de scan
+        # ACTIF (ex. SQL Injection [40018]) — la corrélation SAST/DAST la
+        # plus forte du projet (express-sequelize-injection <-> SQL
+        # Injection, 0.718) disparaissait donc systématiquement en CI.
+        # zap-full-scan.py sans -j (AJAX spider, identifié comme le plus
+        # gros poste de temps en local) garde le scan actif tout en
+        # restant sous 20 min — compromis retenu après un premier essai
+        # CI à 90+ min avec -j (voir CONTEXTE_PROJET_PFA.md, section 17).
+        timeout-minutes: 20
         run: |
           docker run --rm -t -u root \
             --add-host=host.docker.internal:host-gateway \
-            -v "$PWD:/zap/wrk/:rw" zaproxy/zap-stable zap-baseline.py \
+            -v "$PWD:/zap/wrk/:rw" zaproxy/zap-stable zap-full-scan.py \
             -t http://host.docker.internal:3000 \
             -r zap_full_report_v2.html -J zap_full_report_v2.json || true
-          # zap-baseline.py retourne aussi un code non-zéro si des WARN
-          # sont trouvés — seule la présence du fichier fait foi.
+          # Code de retour non-zéro possible même en succès (WARN trouvés)
+          # — seule la présence du fichier fait foi.
           test -f zap_full_report_v2.json
 
       - name: Redteam LLM (Promptfoo)
