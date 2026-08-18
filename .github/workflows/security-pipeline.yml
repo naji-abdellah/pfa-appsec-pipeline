@@ -129,24 +129,91 @@ jobs:
             sleep 2
           done
 
-      - name: Scan DAST (OWASP ZAP — scan actif sans AJAX spider)
-        # zap-baseline.py (passif) ne déclenche jamais les règles de scan
-        # ACTIF (ex. SQL Injection [40018]) — la corrélation SAST/DAST la
-        # plus forte du projet (express-sequelize-injection <-> SQL
-        # Injection, 0.718) disparaissait donc systématiquement en CI.
-        # zap-full-scan.py sans -j (AJAX spider, identifié comme le plus
-        # gros poste de temps en local) garde le scan actif tout en
-        # restant sous 20 min — compromis retenu après un premier essai
-        # CI à 90+ min avec -j (voir CONTEXTE_PROJET_PFA.md, section 17).
+      # ---------------------------------------------------------------
+      # DAST — v3 : spider classique + seed manuel de l'endpoint connu
+      # + scan actif, via l'Automation Framework ZAP, au lieu de
+      # zap-full-scan.py.
+      #
+      # Historique du problème (voir rapport PFA, section CI/CD) :
+      #   v1 : zap-full-scan.py -j (AJAX spider)  -> timeout à 90 min,
+      #        coût réel 0,59 $ pour un run qui ne finit jamais.
+      #   v2 : zap-full-scan.py sans -j            -> tient largement le
+      #        budget (29m27s), MAIS ne retrouve jamais "SQL Injection".
+      #        Cause identifiée : /rest/products/search n'est atteint
+      #        que via une route Angular côté client (recherche produit).
+      #        Le spider TRADITIONNEL de ZAP ne l'a jamais découvert — le
+      #        scanner actif ne teste donc jamais le paramètre "q",
+      #        indépendamment de la politique d'attaque ou du temps
+      #        alloué. Même cause racine que la limite SPA déjà
+      #        documentée sur WebGoat (section 19).
+      #   v3 (ci-dessous) : au lieu de payer le coût d'un crawl JS-aware
+      #        complet (AJAX spider) juste pour découvrir une poignée
+      #        d'endpoints connus, on les enregistre manuellement dans
+      #        l'arbre des sites ZAP via des requêtes directes (job
+      #        "requestor"), puis on lance le scan actif dessus. Garde
+      #        la vitesse de v2 tout en visant la couverture de v1.
+      - name: Générer le plan d'automatisation ZAP (spider + seed manuel + scan actif)
+        run: |
+          cat > zap_automation.yml << 'EOF'
+          env:
+            contexts:
+              - name: Default
+                urls:
+                  - "http://host.docker.internal:3000"
+                includePaths:
+                  - "http://host.docker.internal:3000.*"
+            parameters:
+              failOnError: false
+              progressToStdout: true
+
+          jobs:
+            # Spider classique : couvre les pages server-side normales
+            # (dont /ftp/quarantine, à l'origine de la corrélation
+            # Backup File Disclosure déjà validée en CI). Rapide,
+            # plafonné à 3 min.
+            - type: spider
+              parameters:
+                context: Default
+                url: "http://host.docker.internal:3000"
+                maxDuration: 3
+
+            # Seed manuel de l'endpoint de recherche produit. Le spider
+            # classique ne le découvre jamais (routage Angular côté
+            # client) — ces requêtes l'enregistrent explicitement dans
+            # l'arbre des sites ZAP sans avoir besoin de crawler toute
+            # la SPA avec l'AJAX spider.
+            - type: requestor
+              parameters:
+                user: ""
+              requests:
+                - url: "http://host.docker.internal:3000/rest/products/search?q=apple"
+                  method: GET
+                - url: "http://host.docker.internal:3000/rest/products/search?q=juice"
+                  method: GET
+
+            - type: activeScan
+              parameters:
+                context: Default
+                maxDuration: 12
+
+            - type: report
+              parameters:
+                template: traditional-json
+                reportDir: /zap/wrk
+                reportFile: zap_full_report_v2
+                reportTitle: "Juice Shop DAST - CI"
+          EOF
+
+      - name: Scan DAST (OWASP ZAP — Automation Framework)
         timeout-minutes: 20
         run: |
-          docker run --rm -t -u root \
+          docker run --rm -u root \
             --add-host=host.docker.internal:host-gateway \
-            -v "$PWD:/zap/wrk/:rw" zaproxy/zap-stable zap-full-scan.py \
-            -t http://host.docker.internal:3000 \
-            -r zap_full_report_v2.html -J zap_full_report_v2.json || true
-          # Code de retour non-zéro possible même en succès (WARN trouvés)
-          # — seule la présence du fichier fait foi.
+            -v "$PWD:/zap/wrk/:rw" zaproxy/zap-stable \
+            zap.sh -cmd -autorun /zap/wrk/zap_automation.yml || true
+          # Code de retour non-zéro possible même en succès (WARN trouvés,
+          # ou avertissements d'autorun) — seule la présence du fichier
+          # de rapport fait foi.
           test -f zap_full_report_v2.json
 
       - name: Redteam LLM (Promptfoo)
