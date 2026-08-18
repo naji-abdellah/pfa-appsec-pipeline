@@ -168,14 +168,17 @@ jobs:
 
           jobs:
             # Spider classique : couvre les pages server-side normales
-            # (dont /ftp/quarantine, à l'origine de la corrélation
-            # Backup File Disclosure déjà validée en CI). Rapide,
-            # plafonné à 3 min.
+            # (dont /ftp/quarantine, à l'origine de la corrélation de
+            # référence du projet, Backup File Disclosure). Premier essai
+            # à 3 min : trop court, /ftp/quarantine jamais atteint, la
+            # corrélation de référence a disparu du rapport. Remonté à
+            # 8 min — le budget total (job à 90 min, étape à 25 min) le
+            # permet largement (run précédent complet : 27m32s).
             - type: spider
               parameters:
                 context: Default
                 url: "http://host.docker.internal:3000"
-                maxDuration: 3
+                maxDuration: 8
 
             # Seed manuel de l'endpoint de recherche produit. Le spider
             # classique ne le découvre jamais (routage Angular côté
@@ -205,7 +208,7 @@ jobs:
           EOF
 
       - name: Scan DAST (OWASP ZAP — Automation Framework)
-        timeout-minutes: 20
+        timeout-minutes: 25
         run: |
           docker run --rm -u root \
             --add-host=host.docker.internal:host-gateway \
