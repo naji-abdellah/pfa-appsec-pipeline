@@ -271,9 +271,10 @@ jobs:
           if critical:
               for f in critical:
                   print(f"  - [{f.get('tool')}] {f.get('title')}")
-              # Ne fait volontairement PAS échouer le job (exit 0) : le
-              # triage IA peut se tromper (voir needs_review dans le
-              # rapport PFA) — bloquer le merge automatiquement serait
-              # trop risqué sans revue humaine. Le rapport et ce résumé
-              # servent d'alerte, pas de veto automatique.
+              print()
+              print("GATE DE SÉCURITÉ : build bloqué — des findings Critical/High non résolus ont été détectés.")
+              print("Action requise : examiner les findings listés ci-dessus et les marquer comme résolus ou acceptés.")
+              sys.exit(1)
+          else:
+              print("Gate de sécurité : OK — aucun finding Critical/High non résolu.")
           EOF

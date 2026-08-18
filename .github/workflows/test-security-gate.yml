@@ -1,0 +1,147 @@
+name: Test du gate de sécurité (validation du comportement de blocage)
+
+# Déclencheur : uniquement manuel — ce workflow sert à valider que le gate
+# bloque réellement le build quand un finding Critical est présent.
+# Il n'a pas vocation à tourner à chaque push.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  # =========================================================================
+  # Cas 1 — Gate DOIT bloquer : un finding Critical est présent
+  # Résultat attendu : job "gate-should-block" → FAIL (exit 1) ✅
+  # =========================================================================
+  gate-should-block:
+    runs-on: ubuntu-latest
+    # continue-on-error permet au workflow global de continuer vers le
+    # cas 2 même si ce job échoue (ce qui est le comportement attendu).
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Injecter un finding fictif Critical dans unified_findings_triaged.json
+        run: |
+          cat > unified_findings_triaged.json << 'EOF'
+          [
+            {
+              "id": "test-gate-001",
+              "tool": "TEST",
+              "title": "FINDING FICTIF — test du gate de sécurité (Critical/High)",
+              "owasp_category": "A05",
+              "severity": "Critical",
+              "confirmed": false,
+              "triage": {
+                "verdict": "true_positive",
+                "severity": "Critical",
+                "justification": "Finding injecté artificiellement pour valider que le gate bloque bien le build en présence d'un Critical."
+              }
+            }
+          ]
+          EOF
+
+      - name: Exécuter le gate — DOIT retourner exit(1) et bloquer le build
+        id: gate-step
+        run: |
+          python3 - << 'EOF'
+          import json, sys
+          with open("unified_findings_triaged.json", encoding="utf-8") as f:
+              findings = json.load(f)
+          critical = [
+              f for f in findings
+              if f.get("triage", {}).get("verdict") == "true_positive"
+              and str(f.get("triage", {}).get("severity", "")).lower() in ("critical", "high")
+          ]
+          print(f"{len(critical)} finding(s) Critical/High confirmé(s).")
+          if critical:
+              for f in critical:
+                  print(f"  - [{f.get('tool')}] {f.get('title')}")
+              print()
+              print("GATE DE SÉCURITÉ : build bloqué — des findings Critical/High non résolus ont été détectés.")
+              print("Action requise : examiner les findings listés ci-dessus et les marquer comme résolus ou acceptés.")
+              sys.exit(1)
+          else:
+              print("Gate de sécurité : OK — aucun finding Critical/High non résolu.")
+          EOF
+
+      - name: Confirmer que le gate a bien bloqué (vérification du résultat)
+        if: steps.gate-step.outcome == 'failure'
+        run: |
+          echo "✅ VALIDATION RÉUSSIE : le gate a bien retourné exit(1) en présence d'un finding Critical."
+          echo "Le comportement de blocage est confirmé."
+
+      - name: Signaler si le gate n'a PAS bloqué (anomalie)
+        if: steps.gate-step.outcome == 'success'
+        run: |
+          echo "❌ ANOMALIE : le gate aurait dû bloquer mais a laissé passer le finding Critical."
+          exit 1
+
+  # =========================================================================
+  # Cas 2 — Gate NE DOIT PAS bloquer : aucun finding Critical/High
+  # Résultat attendu : job "gate-should-pass" → SUCCESS ✅
+  # =========================================================================
+  gate-should-pass:
+    runs-on: ubuntu-latest
+    needs: gate-should-block
+    # On exécute ce job même si gate-should-block a échoué (comportement attendu).
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Injecter uniquement des findings Medium/Low dans unified_findings_triaged.json
+        run: |
+          cat > unified_findings_triaged.json << 'EOF'
+          [
+            {
+              "id": "test-gate-002",
+              "tool": "TEST",
+              "title": "FINDING FICTIF — Medium, ne doit pas déclencher le gate",
+              "owasp_category": "A02",
+              "severity": "Medium",
+              "confirmed": false,
+              "triage": {
+                "verdict": "true_positive",
+                "severity": "Medium",
+                "justification": "Finding Medium injecté pour valider que le gate laisse passer un build sans Critical/High."
+              }
+            },
+            {
+              "id": "test-gate-003",
+              "tool": "TEST",
+              "title": "FINDING FICTIF — false_positive Critical, ne doit pas déclencher le gate",
+              "owasp_category": "A05",
+              "severity": "Critical",
+              "confirmed": false,
+              "triage": {
+                "verdict": "false_positive",
+                "severity": "Critical",
+                "justification": "Critical écarté comme faux positif — le gate ne doit PAS bloquer sur un false_positive."
+              }
+            }
+          ]
+          EOF
+
+      - name: Exécuter le gate — DOIT retourner exit(0) et laisser passer le build
+        run: |
+          python3 - << 'EOF'
+          import json, sys
+          with open("unified_findings_triaged.json", encoding="utf-8") as f:
+              findings = json.load(f)
+          critical = [
+              f for f in findings
+              if f.get("triage", {}).get("verdict") == "true_positive"
+              and str(f.get("triage", {}).get("severity", "")).lower() in ("critical", "high")
+          ]
+          print(f"{len(critical)} finding(s) Critical/High confirmé(s).")
+          if critical:
+              for f in critical:
+                  print(f"  - [{f.get('tool')}] {f.get('title')}")
+              print()
+              print("GATE DE SÉCURITÉ : build bloqué.")
+              sys.exit(1)
+          else:
+              print("Gate de sécurité : OK — aucun finding Critical/High non résolu.")
+          EOF
+
+      - name: Confirmer que le gate a bien laissé passer le build
+        run: |
+          echo "✅ VALIDATION RÉUSSIE : le gate laisse bien passer un build sans Critical/High (ou avec uniquement des false_positives)."
