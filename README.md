@@ -86,4 +86,4 @@ pfa-appsec-pipeline/
 ## Auteur
 
 **Naji Abdellah** — Génie Logiciel et Digitalisation, ENSEM Casablanca
-[LinkedIn](#) · [GitHub](https://github.com/naji-abdellah)
+[LinkedIn](https://www.linkedin.com/in/naji-abdellah-834411315/) · [GitHub](https://github.com/naji-abdellah)
